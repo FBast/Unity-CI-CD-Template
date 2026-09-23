@@ -1,0 +1,85 @@
+# Point d'entree du pipeline : build multi-plateformes puis release GitHub.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (ex: 0.1.0). Vide = 0.0.<numero de run>"
+        required: false
+        default: ""
+      platforms:
+        description: "Plateformes : 'all' ou liste (windows,webgl)"
+        required: false
+        default: "all"
+      prerelease:
+        description: "Marquer la release comme pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: plan
+        run: |
+          set -euo pipefail
+          CONF=.github/platforms.json
+          FILTER="${{ inputs.platforms }}"
+
+          if [ -z "$FILTER" ] || [ "$FILTER" = "all" ]; then
+            LIST=$(jq -c '[.platforms[] | select(.enabled)]' "$CONF")
+          else
+            LIST=$(jq -c --arg f "$FILTER" \
+              '[.platforms[] | select([$f | split(",") | .[] | gsub("^\\s+|\\s+$";"")] | index(.name))]' "$CONF")
+          fi
+
+          COUNT=$(echo "$LIST" | jq 'length')
+          [ "$COUNT" -gt 0 ] || { echo "Aucune plateforme selectionnee (filtre: $FILTER)" >&2; exit 1; }
+
+          TAG="${{ inputs.version }}"
+          [ -n "$TAG" ] || TAG="0.0.${{ github.run_number }}"
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+
+          echo "matrix={\"include\":$LIST}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "$TAG -> $(echo "$LIST" | jq -r '[.[].name] | join(", ")')"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/build-unity.yml
+    with:
+      unity_target: ${{ matrix.unityTarget }}
+      tag: ${{ needs.plan.outputs.tag }}
+    secrets: inherit
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - run: ls -lh dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: ${{ needs.plan.outputs.tag }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: dist/*.zip

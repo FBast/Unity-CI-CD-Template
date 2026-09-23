@@ -1,0 +1,28 @@
+{
+  "platforms": [
+    {
+      "name": "windows",
+      "unityTarget": "StandaloneWindows64",
+      "itchChannel": "windows",
+      "enabled": true
+    },
+    {
+      "name": "linux",
+      "unityTarget": "StandaloneLinux64",
+      "itchChannel": "linux",
+      "enabled": false
+    },
+    {
+      "name": "webgl",
+      "unityTarget": "WebGL",
+      "itchChannel": "html5",
+      "enabled": false
+    },
+    {
+      "name": "android",
+      "unityTarget": "Android",
+      "itchChannel": "android",
+      "enabled": false
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+# Workflow reutilisable : construit UNE plateforme et publie son zip en artefact.
+# Appele par release.yml, jamais declenche directement.
+name: Build Unity (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      unity_target:
+        description: "Cible Unity (StandaloneWindows64, WebGL, Android...)"
+        required: true
+        type: string
+      tag:
+        description: "Tag de version, ex: v0.1.0"
+        required: true
+        type: string
+      runner:
+        description: "Labels du runner, en JSON"
+        required: false
+        type: string
+        default: '["self-hosted","windows"]'
+    secrets:
+      ANDROID_KEYSTORE_PASS:
+        required: false
+      ANDROID_KEYALIAS_PASS:
+        required: false
+
+jobs:
+  build:
+    runs-on: ${{ fromJson(inputs.runner) }}
+    timeout-minutes: 120
+    env:
+      UNITY_TARGET: ${{ inputs.unity_target }}
+      ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+      ANDROID_KEYALIAS_PASS: ${{ secrets.ANDROID_KEYALIAS_PASS }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          clean: false   # garde Library entre deux builds
+
+      - name: Build
+        shell: powershell
+        run: |
+          $unityVersion = (Select-String -Path ProjectSettings/ProjectVersion.txt -Pattern '^m_EditorVersion: (.+)$').Matches[0].Groups[1].Value.Trim()
+          $unity = "C:\Program Files\Unity\Hub\Editor\$unityVersion\Editor\Unity.exe"
+          if (-not (Test-Path $unity)) { throw "Unity $unityVersion not found on this runner - install it via Unity Hub" }
+
+          $out = "Build/$env:UNITY_TARGET"
+          Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+          Remove-Item -Force build.log -ErrorAction SilentlyContinue
+
+          $unityArgs = @(
+            '-batchmode', '-nographics', '-quit',
+            '-projectPath', "`"$PWD`"",
+            '-buildTarget', $env:UNITY_TARGET,
+            '-executeMethod', 'BuildScript.Build',
+            '-customBuildPath', $out,
+            '-logFile', 'build.log'
+          )
+
+          Write-Host "Unity $unityVersion -> $env:UNITY_TARGET"
+          $p = Start-Process -FilePath $unity -ArgumentList $unityArgs -Wait -PassThru -NoNewWindow
+          Get-Content build.log -Tail 150 -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "Unity build failed (exit code $($p.ExitCode)) - see the log artifact" }
+
+      - name: Package
+        shell: powershell
+        run: |
+          $zip = "${{ github.event.repository.name }}-$env:UNITY_TARGET-${{ inputs.tag }}.zip"
+          Remove-Item -Force $zip -ErrorAction SilentlyContinue
+          # ZipFile et non Compress-Archive : gere correctement les dossiers vides,
+          # sinon butler rejette l'archive (MonoBleedingEdge/etc en doublon)
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory("$PWD\Build\$env:UNITY_TARGET", "$PWD\$zip")
+          Write-Host "Package: $zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ inputs.unity_target }}
+          path: "*.zip"
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-${{ inputs.unity_target }}
+          path: build.log
+          retention-days: 7

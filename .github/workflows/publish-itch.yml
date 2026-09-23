@@ -1,0 +1,95 @@
+# Publication itch.io : declenchee par la publication d'une release GitHub.
+name: Publish to itch.io
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag a publier (vide = derniere release)"
+        required: false
+        default: ""
+      platforms:
+        description: "Plateformes : 'all' ou liste (windows,webgl)"
+        required: false
+        default: "all"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: plan
+        run: |
+          set -euo pipefail
+          CONF=.github/platforms.json
+          FILTER="${{ inputs.platforms }}"
+
+          if [ -z "$FILTER" ] || [ "$FILTER" = "all" ]; then
+            LIST=$(jq -c '[.platforms[] | select(.itchChannel != null)]' "$CONF")
+          else
+            LIST=$(jq -c --arg f "$FILTER" \
+              '[.platforms[] | select(.itchChannel != null) | select([$f | split(",") | .[] | gsub("^\\s+|\\s+$";"")] | index(.name))]' "$CONF")
+          fi
+
+          TAG="${{ github.event.release.tag_name }}"
+          [ -n "$TAG" ] || TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          fi
+
+          echo "matrix={\"include\":$LIST}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  push:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1        # butler n'aime pas les pushes concurrents sur un meme jeu
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ITCH_USER: ${{ vars.ITCH_USER || github.repository_owner }}
+      ITCH_GAME: ${{ vars.ITCH_GAME || github.event.repository.name }}
+    steps:
+      - name: Telecharger le package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${{ needs.plan.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*-${{ matrix.unityTarget }}-*.zip" \
+            --dir dist
+          ls -lh dist
+
+      - name: Installer butler
+        run: |
+          set -euo pipefail
+          curl -sL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -q butler.zip -d "$HOME/butler"
+          chmod +x "$HOME/butler/butler"
+          echo "$HOME/butler" >> "$GITHUB_PATH"
+
+      - name: Push
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+        run: |
+          set -euo pipefail
+          ZIP=$(ls dist/*.zip | head -n1)
+          TARGET="$ITCH_USER/$ITCH_GAME:${{ matrix.itchChannel }}"
+          echo "$ZIP -> $TARGET"
+          butler push "$ZIP" "$TARGET" --userversion "${{ needs.plan.outputs.version }}"
+          butler status "$ITCH_USER/$ITCH_GAME"
